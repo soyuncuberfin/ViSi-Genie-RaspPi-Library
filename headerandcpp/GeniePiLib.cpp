@@ -9,6 +9,67 @@
 
 
 
+// ===========================================================================
+// Requirement 5: ACK/NAK Timeout
+//
+// waitForAck() eski "while (!genieAck.load() && !genieNak.load()) delay(1);"
+// desenini TEK bir yerde topluyor: artik busy-wait yerine condition_variable
+// kullaniyor VE bir timeout'a sahip. ACK gelirse GENIE_OK, NAK gelirse
+// GENIE_ERROR_NAK, sure dolarsa GENIE_ERROR_TIMEOUT donuyor.
+// ===========================================================================
+int GeniePi::waitForAck(void)
+{
+    std::unique_lock<std::mutex> lock(ackMutex);
+    unsigned int timeout = ackTimeoutMs.load();
+    bool signaled = ackCv.wait_for(lock, std::chrono::milliseconds(timeout),
+                                    [this] { return genieAck.load() || genieNak.load(); });
+    if (!signaled)
+        return GENIE_ERROR_TIMEOUT; // artik SONSUZA KADAR beklemiyor
+    return genieNak.load() ? GENIE_ERROR_NAK : GENIE_OK;
+}
+
+// ===========================================================================
+// Requirement 1: Button Event Debounce (bkz. GeniePiLib.h'deki aciklama:
+// tek/global "son kabul edilen event" - object+index bazli harita DEGIL)
+// ===========================================================================
+bool GeniePi::shouldDebounce(int object, int index, unsigned int data,
+                              std::chrono::steady_clock::time_point now)
+{
+    unsigned int window = debounceMs.load(std::memory_order_relaxed);
+    std::lock_guard<std::mutex> lock(debounceMutex);
+
+    if (window > 0 && lastEvent.valid &&
+        lastEvent.object == object && lastEvent.index == index && lastEvent.data == data)
+    {
+        auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastEvent.ts).count();
+        if (elapsedMs >= 0 && (unsigned long long)elapsedMs < window)
+            return true; // gercek duplicate: ayni obj+idx+data, pencere icinde, arada baska event yok
+    }
+
+    lastEvent = LastEvent{object, index, data, now, true};
+    return false;
+}
+
+void GeniePi::setDebounceTime(unsigned int milliseconds) { debounceMs.store(milliseconds, std::memory_order_relaxed); }
+unsigned int GeniePi::getDebounceTime(void) const { return debounceMs.load(std::memory_order_relaxed); }
+
+void GeniePi::setAckTimeout(unsigned int milliseconds) { ackTimeoutMs.store(milliseconds); }
+unsigned int GeniePi::getAckTimeout(void) const { return ackTimeoutMs.load(); }
+
+uint32_t GeniePi::getDroppedEventCount(void) const { return droppedEvents.load(std::memory_order_relaxed); }
+
+// ===========================================================================
+// Requirement 4: genieReadObj'nin ilgisiz bulup biriktirdigi event'leri
+// SIRAYI BOZMADAN kuyrugun basina geri koyar.
+// ===========================================================================
+void GeniePi::requeueFront(std::deque<genieReplyStruct> &items)
+{
+    if (items.empty()) return;
+    std::lock_guard<std::mutex> lock(replyQueueMutex);
+    replyQueue.insert(replyQueue.begin(), items.begin(), items.end());
+    replyQueueCv.notify_all();
+}
+
 int GeniePi::genieOpen(char *device, int baud)
 {
     struct termios options;
@@ -167,8 +228,8 @@ void GeniePi::genieReplyListener(void)
                 return;
         }
 
-        if (cmd == GENIE_ACK) { genieAck.store(true); continue; }
-        if (cmd == GENIE_NAK) { genieNak.store(true); continue; }
+        if (cmd == GENIE_ACK) { genieAck.store(true); ackCv.notify_all(); continue; }
+        if (cmd == GENIE_NAK) { genieNak.store(true); ackCv.notify_all(); continue; }
 
         unsigned char csum = (unsigned char)cmd;
 
@@ -216,44 +277,64 @@ void GeniePi::genieReplyListener(void)
             continue;
         }
 
-        int next = (genieReplysHead + 1) & (MAX_GENIE_REPLYS - 1);
-
         if (cmd == GENIE_REPORT_MAGIC_BYTES || cmd == GENIE_REPORT_DOUBLE_BYTES)
         {
-            if (next != genieReplysTail)
+            genieMagicReplyStruct magicByteReply;
+            magicByteReply.cmd    = cmd;
+            magicByteReply.index  = object;
+            magicByteReply.length = index;
+
+            if (cmd == GENIE_REPORT_MAGIC_BYTES)
             {
-                genieMagicReplyStruct *magicByteReply = &genieMagicReplys[genieReplysHead];
-                magicByteReply->cmd    = cmd;
-                magicByteReply->index  = object;
-                magicByteReply->length = index;
-
-                if (cmd == GENIE_REPORT_MAGIC_BYTES)
-                {
-                    for (readLength = 0; readLength < totalLength; readLength++)
-                        magicByteReply->data[readLength] = (unsigned int)byteData[readLength];
-                }
-
-                if (cmd == GENIE_REPORT_DOUBLE_BYTES)
-                {
-                    for (readLength = 1; readLength < totalLength; readLength++)
-                        magicByteReply->data[readLength] =
-                            (unsigned int)((byteData[readLength * 2] << 8) |
-                                            byteData[(readLength * 2) + 1]);
-                }
-
-                genieReplysHead = next;
+                for (readLength = 0; readLength < totalLength; readLength++)
+                    magicByteReply.data[readLength] = (unsigned int)byteData[readLength];
             }
+            if (cmd == GENIE_REPORT_DOUBLE_BYTES)
+            {
+                for (readLength = 1; readLength < totalLength; readLength++)
+                    magicByteReply.data[readLength] =
+                        (unsigned int)((byteData[readLength * 2] << 8) |
+                                        byteData[(readLength * 2) + 1]);
+            }
+
+            // Requirement 3: kuyruk doluysa event artik SESSIZCE degil,
+            // GOZLEMLENEBILIR sekilde (droppedEvents sayaci) discard edilir.
+            std::lock_guard<std::mutex> lock(replyQueueMutex);
+            if (magicReplyQueue.size() < GENIE_QUEUE_CAPACITY)
+                magicReplyQueue.push_back(magicByteReply);
+            else
+                droppedEvents.fetch_add(1, std::memory_order_relaxed);
         }
         else
         {
-            if (next != genieReplysTail)
+            unsigned int data = (unsigned int)((msb << 8) | lsb);
+            auto now = std::chrono::steady_clock::now();
+
+            // Requirement 1: debounce SADECE GENIE_REPORT_EVENT (button/
+            // slider/switch/rockersw gibi widget event'leri) icin uygulanir;
+            // GENIE_REPORT_OBJ (genieReadObj cevaplari) debounce'a TABI DEGIL.
+            if (cmd == GENIE_REPORT_EVENT &&
+                shouldDebounce(object, index, data, now))
             {
-                genieReplyStruct *reply = &genieReplys[genieReplysHead];
-                reply->cmd    = cmd;
-                reply->object = object;
-                reply->index  = index;
-                reply->data   = (unsigned int)((msb << 8) | lsb);
-                genieReplysHead = next;
+                continue; // duplicate rapid press -> discard, kuyruga hic girmiyor
+            }
+
+            genieReplyStruct reply;
+            reply.cmd    = cmd;
+            reply.object = object;
+            reply.index  = index;
+            reply.data   = data;
+
+            std::unique_lock<std::mutex> lock(replyQueueMutex);
+            if (replyQueue.size() < GENIE_QUEUE_CAPACITY)
+            {
+                replyQueue.push_back(reply);
+                lock.unlock();
+                replyQueueCv.notify_all(); // Requirement 2: bekleyen application thread'i uyandir
+            }
+            else
+            {
+                droppedEvents.fetch_add(1, std::memory_order_relaxed); // Requirement 3
             }
         }
     }
@@ -261,16 +342,18 @@ void GeniePi::genieReplyListener(void)
 
 int GeniePi::genieReplyAvail(void)
 {
-    return (genieReplysHead != genieReplysTail);
+    std::lock_guard<std::mutex> lock(replyQueueMutex);
+    return !replyQueue.empty();
 }
 
 void GeniePi::genieGetReply(struct genieReplyStruct *reply)
 {
-    while (!genieReplyAvail())
-        delay(1);
-
-    std::memcpy(reply, &genieReplys[genieReplysTail], sizeof(struct genieReplyStruct));
-    genieReplysTail = (genieReplysTail + 1) & (MAX_GENIE_REPLYS - 1);
+    // Requirement 2: artik "while(!avail) delay(1)" ile busy-wait YOK.
+    // condition_variable, listener push yaptiginda bizi dogrudan uyandirir.
+    std::unique_lock<std::mutex> lock(replyQueueMutex);
+    replyQueueCv.wait(lock, [this] { return !replyQueue.empty(); });
+    *reply = replyQueue.front();
+    replyQueue.pop_front();
 }
 
 int GeniePi::_genieReadObj(int object, int index)
@@ -279,9 +362,10 @@ int GeniePi::_genieReadObj(int object, int index)
     unsigned int timeUp;
     unsigned char checksum;
 
-    while (genieReplyAvail())
-        genieGetReply(&reply);
-
+    // Requirement 4: ESKI KOD burada "while (genieReplyAvail())
+    // genieGetReply(&reply);" ile kuyrukta bekleyen HER SEYI (asenkron
+    // button event'leri dahil) cagri basinda sessizce siliyordu. Bu iki
+    // satir TAMAMEN KALDIRILDI - artik hicbir sey onceden temizlenmiyor.
     genieAck.store(false);
     genieNak.store(false);
 
@@ -290,20 +374,34 @@ int GeniePi::_genieReadObj(int object, int index)
     geniePutchar(index);          checksum ^= (unsigned char)index;
     geniePutchar(checksum);
 
+    // Requirement 4/6: kendi cevabimizi beklerken karsilastigimiz ILGISIZ
+    // mesajlari (ozellikle GENIE_REPORT_EVENT) burada geciciye topluyoruz;
+    // asla dogrudan atmiyoruz. Fonksiyon donmeden once bunlari SIRAYI
+    // BOZMADAN kuyrugun basina geri koyacagiz (requeueFront).
+    std::deque<genieReplyStruct> unrelated;
+
     for (timeUp = millis() + 50; millis() < timeUp; )
     {
         if (genieNak.load())
-            return -1;
+        {
+            requeueFront(unrelated);
+            return GENIE_ERROR_NAK;
+        }
 
         if (genieReplyAvail())
         {
             genieGetReply(&reply);
             if ((reply.cmd == GENIE_REPORT_OBJ) && (reply.object == object) && (reply.index == index))
+            {
+                requeueFront(unrelated); // ilgisizleri geri koy, SONRA don
                 return reply.data;
+            }
+            unrelated.push_back(reply); // ör. bir button event'i -> KAYBETME
         }
         delayMicroseconds(101);
     }
-    return -1;
+    requeueFront(unrelated);
+    return GENIE_ERROR_TIMEOUT;
 }
 
 int GeniePi::genieReadObj(int object, int index)
@@ -329,10 +427,7 @@ int GeniePi::_genieWriteObj(int object, int index, unsigned int data)
     geniePutchar(lsb);             checksum ^= lsb;
     geniePutchar(checksum);
 
-    while (!genieAck.load() && !genieNak.load())
-        delay(1);
-
-    return 0;
+    return waitForAck(); // Requirement 5: ACK->GENIE_OK, NAK->GENIE_ERROR_NAK, timeout->GENIE_ERROR_TIMEOUT
 }
 
 int GeniePi::genieWriteObj(int object, int index, unsigned int data)
@@ -375,10 +470,7 @@ int GeniePi::_genieWriteContrast(int value)
     geniePutchar(value);                checksum ^= (unsigned char)value;
     geniePutchar(checksum);
 
-    while (!genieAck.load() && !genieNak.load())
-        delay(1);
-
-    return 0;
+    return waitForAck();
 }
 
 int GeniePi::genieWriteContrast(int value)
@@ -408,10 +500,7 @@ int GeniePi::_genieWriteStr(int index, char *string)
     }
     geniePutchar(checksum);
 
-    while (!genieAck.load() && !genieNak.load())
-        delay(1);
-
-    return 0;
+    return waitForAck();
 }
 
 int GeniePi::genieWriteStr(int index, char *string)
@@ -441,10 +530,7 @@ int GeniePi::_genieWriteStrU(int index, char *string)
     }
     geniePutchar(checksum);
 
-    while (!genieAck.load() && !genieNak.load())
-        delay(1);
-
-    return 0;
+    return waitForAck();
 }
 
 int GeniePi::genieWriteStrU(int index, char *string)
@@ -470,8 +556,10 @@ int GeniePi::_genieMakeStr(int index, long n, int base)
     } while (n);
     if (neg) *--str = '-';
 
-    _genieWriteStr(index, str);
-    return 0;
+    // Kucuk ek duzeltme: bu fonksiyon _genieWriteStr'nin GERCEK ACK/NAK/
+    // timeout sonucunu artik yutmuyor, oldugu gibi yukari tasiyor
+    // (Requirement 5'in ruhuna uygun olsun diye).
+    return _genieWriteStr(index, str);
 }
 
 int GeniePi::genieWriteStrHex(int index, long n)
@@ -504,8 +592,7 @@ int GeniePi::_genieWriteStrFloat(int index, float n, int precision)
 {
     char str[64];
     std::snprintf(str, sizeof(str), "%.*g", precision, (double)n);
-    _genieWriteStr(index, str);
-    return 0;
+    return _genieWriteStr(index, str); // Requirement 5: gercek sonucu yukari tasi
 }
 
 int GeniePi::genieWriteStrFloat(int index, float n, int precision)
@@ -540,10 +627,7 @@ int GeniePi::_genieWriteInhLabel(int index, char *string)
     }
     geniePutchar(checksum);
 
-    while (!genieAck.load() && !genieNak.load())
-        delay(1);
-
-    return 0;
+    return waitForAck();
 }
 
 int GeniePi::genieWriteInhLabel(int index, char *string)
@@ -569,8 +653,7 @@ int GeniePi::_genieMakeInhLabel(int index, long n, int base)
     } while (n);
     if (neg) *--str = '-';
 
-    _genieWriteInhLabel(index, str);
-    return 0;
+    return _genieWriteInhLabel(index, str); // Requirement 5: gercek sonucu yukari tasi
 }
 
 int GeniePi::genieWriteInhLabelHex(int index, long n)
@@ -603,8 +686,7 @@ int GeniePi::_genieWriteInhLabelFloat(int index, float n, int precision)
 {
     char str[64];
     std::snprintf(str, sizeof(str), "%.*g", precision, (double)n);
-    _genieWriteInhLabel(index, str);
-    return 0;
+    return _genieWriteInhLabel(index, str); // Requirement 5: gercek sonucu yukari tasi
 }
 
 int GeniePi::genieWriteInhLabelFloat(int index, float n, int precision)
@@ -640,10 +722,7 @@ int GeniePi::_genieWriteMagicBytes(int magic_index, unsigned int *byteArray)
     }
     geniePutchar(checksum);
 
-    while (!genieAck.load() && !genieNak.load())
-        delay(1);
-
-    return 0;
+    return waitForAck();
 }
 
 int GeniePi::genieWriteMagicBytes(int magic_index, unsigned int *byteArray)
@@ -681,10 +760,7 @@ int GeniePi::_genieWriteDoubleBytes(int magic_index, unsigned int *doubleByteArr
     }
     geniePutchar(checksum);
 
-    while (!genieAck.load() && !genieNak.load())
-        delay(1);
-
-    return 0;
+    return waitForAck();
 }
 
 int GeniePi::genieWriteDoubleBytes(int magic_index, unsigned int *doubleByteArray)
@@ -716,4 +792,20 @@ int GeniePi::genieSetup(char *device, int baud)
     listenerThread = std::thread(&GeniePi::genieReplyListener, this);
 
     return 0;
+}
+
+// Requirement 8: genieSetup ile ayni sonucu (fd baglanmis + listener thread
+// calisir durumda) verir, ama genieOpen()/handshake adimini atlar. Boylece
+// stress testleri gercek /dev/ttyUSB0 olmadan, socketpair() ile
+// olusturulmus bir fd uzerinden genieReplyListener'i UCTAN UCA calistirabilir.
+void GeniePi::genieAttachFd(int fd)
+{
+    genieFd = fd;
+
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    epoch = (tv.tv_sec * 1000000ULL + tv.tv_usec) / 1000;
+
+    listenerRunning.store(true);
+    listenerThread = std::thread(&GeniePi::genieReplyListener, this);
 }

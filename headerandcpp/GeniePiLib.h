@@ -52,6 +52,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <condition_variable>   // Requirement 2: thread-safe queue icin
+#include <deque>                // Requirement 2/4: sirali, "geri koyulabilir" kuyruk icin
 
 // ---------------------------------------------------------------------
 // Genie komutlari & cevaplari (geniePi.h ile BIREBIR AYNI degerler)
@@ -151,6 +153,20 @@
 #define MAX_GENIE_REPLYS                  16
 
 // ---------------------------------------------------------------------
+// Requirement 5: ACK -> basari, NAK -> protokol hatasi, timeout -> timeout
+// hatasi. GENIE_OK == 0 oldugu icin eski "if (genie.genieWriteObj(...) == 0)"
+// kontrolleri KIRILMADAN calismaya devam eder; sadece artik gercek hata
+// kodlari da ayirt edilebiliyor (eskiden fonksiyonlar NAK gelse bile hep 0
+// donuyordu, bkz. GeniePiLib.cpp'deki degisiklikler).
+// ---------------------------------------------------------------------
+enum GenieResult
+{
+    GENIE_OK             = 0,
+    GENIE_ERROR_NAK       = -1,
+    GENIE_ERROR_TIMEOUT   = -2,
+};
+
+// ---------------------------------------------------------------------
 // Struct'lar (geniePi.h ile BIREBIR AYNI alan tipleri)
 // ---------------------------------------------------------------------
 struct genieReplyStruct
@@ -186,6 +202,25 @@ public:
 
     int  genieSetup(char *device, int baud);
     void genieClose(void);
+
+    // Requirement 8 (stress test) icin: gercek donaniminiz olmadan
+    // socketpair() gibi onceden acilmis bir fd'yi "seri port" olarak
+    // baglar ve listener thread'i baslatir. genieSetup ile ayni sonucu
+    // verir, sadece genieOpen() (gercek /dev/ttyUSB0 acma) adimini atlar.
+    void genieAttachFd(int fd);
+
+    // --- Requirement 1: Configurable debounce ---
+    //   genie.setDebounceTime(150);  // onerilen varsayilan
+    //   genie.setDebounceTime(0);    // debounce'u tamamen kapatir
+    void         setDebounceTime(unsigned int milliseconds);
+    unsigned int getDebounceTime(void) const;
+
+    // --- Requirement 5: Configurable ACK/NAK timeout ---
+    void         setAckTimeout(unsigned int milliseconds); // varsayilan 500ms
+    unsigned int getAckTimeout(void) const;
+
+    // --- Requirement 3: Queue overflow gozlemlenebilirligi ---
+    uint32_t getDroppedEventCount(void) const;
 
     int  genieReplyAvail(void);
     void genieGetReply(struct genieReplyStruct *reply);
@@ -251,14 +286,73 @@ private:
     int  _genieWriteMagicBytes (int magic_index, unsigned int *byteArray);
     int  _genieWriteDoubleBytes (int magic_index, unsigned int *doubleByteArray);
 
-private:
-    genieReplyStruct      genieReplys[MAX_GENIE_REPLYS];
-    genieMagicReplyStruct genieMagicReplys[MAX_GENIE_REPLYS];
-    int genieReplysHead = 0;
-    int genieReplysTail = 0;
+    // --- Requirement 1: debounce karari ---
+    bool shouldDebounce(int object, int index, unsigned int data,
+                         std::chrono::steady_clock::time_point now);
 
+    // --- Requirement 5: ACK/NAK'i condition_variable ile, TIMEOUT'lu bekler ---
+    int  waitForAck(void);
+
+    // --- Requirement 4: genieReadObj sirasinda "ilgisiz" olarak biriktirilen
+    // event'leri, sirayi bozmadan kuyrugun basina geri koyar ---
+    void requeueFront(std::deque<genieReplyStruct> &items);
+
+private:
+    // ===================================================================
+    // Requirement 2/3/4: Thread-Safe Reply/Event Queue
+    //
+    // ESKI: sabit boyutlu genieReplys[MAX_GENIE_REPLYS] dizisi + duz int
+    // genieReplysHead/genieReplysTail. Listener thread head'i, application
+    // thread tail'i degistiriyordu; aralarinda HICBIR senkronizasyon
+    // (mutex/atomic) yoktu -> veri yarisi (data race).
+    //
+    // YENI: std::deque + mutex + condition_variable. deque secildi cünkü
+    // Requirement 4 (genieReadObj event kaybini engelleme) icin, kendi
+    // cevabini beklerken karsilasilan ilgisiz mesajlarin (ör. button
+    // event'i) kuyrugun BASINA, SIRASI BOZULMADAN geri konulmasi gerekiyor;
+    // bu sabit ring buffer'da dogal degil, deque'de trivial (insert(begin,...)).
+    // ===================================================================
+    std::mutex                        replyQueueMutex;
+    std::condition_variable           replyQueueCv;
+    std::deque<genieReplyStruct>      replyQueue;
+    std::deque<genieMagicReplyStruct> magicReplyQueue;
+    static constexpr size_t GENIE_QUEUE_CAPACITY = 256; // eski 16'dan buyutuldu
+
+    // Requirement 3: overflow artik sessiz degil, gozlemlenebilir.
+    std::atomic<uint32_t> droppedEvents{0};
+
+    // ===================================================================
+    // Requirement 1: Button Event Debounce
+    //
+    // BILEREK tekil ("son kabul edilen event") bir hafiza tutuluyor -
+    // object+index bazinda bir HARITA degil. Sebep: Event Ordering
+    // (Requirement 6) ile celisiyor olmasi -- Button1 -> Button2 -> Button1
+    // -> Button3 sirasinda ikinci Button1'in, arada Button2 kabul edildigi
+    // icin YENIDEN "yeni" sayilmasi gerekiyor. Karar SADECE zaman damgasi
+    // karsilastirmasi ile veriliyor; sleep()/usleep()/delay() YOK.
+    // ===================================================================
+    struct LastEvent {
+        int object = -1, index = -1;
+        unsigned int data = 0;
+        std::chrono::steady_clock::time_point ts{};
+        bool valid = false;
+    };
+    std::mutex   debounceMutex;
+    LastEvent    lastEvent;
+    std::atomic<unsigned int> debounceMs{150}; // onerilen varsayilan
+
+    // ===================================================================
+    // Requirement 5: ACK/NAK Timeout
+    //
+    // genieAck/genieNak atomic bayraklari KALDI (API'yi bozmamak icin),
+    // ama artik "while(...) delay(1)" ile degil, condition_variable ile
+    // ve bir TIMEOUT ile bekleniyor (bkz. waitForAck()).
+    // ===================================================================
     std::atomic<bool> genieAck{false};
     std::atomic<bool> genieNak{false};
+    std::mutex             ackMutex;
+    std::condition_variable ackCv;
+    std::atomic<unsigned int> ackTimeoutMs{500}; // onerilen varsayilan
 
     std::mutex  genieMutex;
     int         genieFd = -1;
