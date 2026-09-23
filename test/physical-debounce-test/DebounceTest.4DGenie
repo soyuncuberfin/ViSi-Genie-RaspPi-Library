@@ -1,0 +1,118 @@
+﻿Version     0.0
+Platform    uLCD-43DT-L
+PlatRes     272x480
+Depends
+end
+Options
+    Genie
+    Speed                        9600
+    Checksum                     No
+    ResponseSize                 2
+    Multidrop                    No
+    Destination                  1
+    DestBank                     0
+    MainForm                     0
+    SndBuf                       0
+    ButtonDisable                No
+    SignedDigits                 No
+    MaxString                    75
+    ComPort                      0
+    ComTX1pinIdx                 0
+    ComRX1pinIdx                 0
+    FileSystem                   FATfs
+    FlashEraseOption             Optimal
+    SPIenable                    0
+    SPIsdo                       3
+    SPIsdi                       2
+    SPIsck                       1
+    ForceProgramFlash            No
+    PixxiuSDSpeed                0
+    FlashForceLT16MB             No
+end
+Form
+    Name                         Form0
+    Alias                        MAIN_FORM
+    Bgtype                       Color
+    Color                        BLACK
+    Image                        (None)
+    Source.Height                0
+    Source.Left                  0
+    Source.Top                   0
+    Source.Width                 0
+    OnActivate                   ''
+    OnCreate                     ''
+    OnRepeat                     ''
+    OnTouchMoving                ''
+    OnTouchPressed               ''
+    OnTouchReleased              ''
+end
+UserButton
+    Name                         Userbutton0
+    Alias                        BTN_TEST
+    Height                       143
+    Images                       anib_02.png
+    Left                         28
+    Matrix                       -1
+    Momentary                    Yes
+    Stretch                      No
+    Top                          48
+    Width                        143
+    OnChanged                    'Report Message'
+end
+LedDigits
+    Name                         Leddigits0
+    Alias                        ' DIGIT_RAW'
+    Color                        BLACK
+    Decimals                     2
+    Digits                       4
+    Height                       35
+    LeadingZero                  Yes
+    Left                         280
+    OutlineColor                 BLACK
+    Palette.High                 DARKMAGENTA
+    Palette.Low                  0x005100
+    Top                          44
+    Width                        120
+    OnChanged                    ''
+    OnTouchMoving                ''
+    OnTouchPressed               ''
+    OnTouchReleased              ''
+end
+LedDigits
+    Name                         Leddigits1
+    Alias                        DIGIT_ACCEPTED
+    Color                        BLACK
+    Decimals                     2
+    Digits                       4
+    Height                       35
+    LeadingZero                  Yes
+    Left                         284
+    OutlineColor                 BLACK
+    Palette.High                 clLime
+    Palette.Low                  0x005100
+    Top                          96
+    Width                        120
+    OnChanged                    ''
+    OnTouchMoving                ''
+    OnTouchPressed               ''
+    OnTouchReleased              ''
+end
+LedDigits
+    Name                         Leddigits2
+    Alias                        DIGIT_REJECTED
+    Color                        BLACK
+    Decimals                     2
+    Digits                       4
+    Height                       35
+    LeadingZero                  Yes
+    Left                         284
+    OutlineColor                 BLACK
+    Palette.High                 DARKORANGE
+    Palette.Low                  0x005100
+    Top                          160
+    Width                        120
+    OnChanged                    ''
+    OnTouchMoving                ''
+    OnTouchPressed               ''
+    OnTouchReleased              ''
+end
