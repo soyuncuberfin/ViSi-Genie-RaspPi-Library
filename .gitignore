@@ -1,1 +1,3 @@
 headerandcpp/test_rapid_events
+*.log
+logs/
