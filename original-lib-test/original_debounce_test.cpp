@@ -147,8 +147,8 @@ int main(int argc, char **argv) {
                     std::printf(">>> [EVENT KABUL] Buton Index=%d Deger=%u (Toplam=%u)\n",
                                 objIndex, val, acceptedCount);
 
-                    writeDigit(fd, LEDDIGITS_DIGIT_RAW, acceptedCount);
-                    writeDigit(fd, LEDDIGITS_DIGIT_ACCEPTED, acceptedCount);
+                    //writeDigit(fd, LEDDIGITS_DIGIT_RAW, acceptedCount);
+                    //writeDigit(fd, LEDDIGITS_DIGIT_ACCEPTED, acceptedCount);
                 }
             }
         }
