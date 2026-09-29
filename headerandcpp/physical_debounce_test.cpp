@@ -146,7 +146,9 @@ int main(int argc, char **argv)
 
             if (reply.cmd == GENIE_REPORT_EVENT &&
                 reply.object == GENIE_OBJ_USERBUTTON &&
-                reply.index == USERBUTTON_BTN_TEST)
+                    (reply.index == USERBUTTON_BUTTON_0 || reply.index == USERBUTTON_BUTTON_1)) //Formlu versiyonda iki butonu da kabul etmesi için
+                
+                //reply.index == USERBUTTON_BTN_TEST) Normal test için bu satır aktive edilir
             {
                 ++acceptedCount;
 
@@ -171,9 +173,11 @@ int main(int argc, char **argv)
 
                 // --- Sayaclari geri ekrana yaz, fiziksel ekranda canli
                 //     olarak gorunsun (Bolum 2'nin istedigi UI) ---
-                genie.genieWriteObj(GENIE_OBJ_LED_DIGITS, LEDDIGITS_DIGIT_RAW, genie.getRawEventCount());
-                genie.genieWriteObj(GENIE_OBJ_LED_DIGITS, LEDDIGITS_DIGIT_ACCEPTED, acceptedCount);
-                genie.genieWriteObj(GENIE_OBJ_LED_DIGITS, LEDDIGITS_DIGIT_REJECTED, genie.getDebouncedEventCount());
+                
+                //Formlu test için bu kodları yorum satırına alıyoruz yeni tasarımda digit yok
+                //genie.genieWriteObj(GENIE_OBJ_LED_DIGITS, LEDDIGITS_DIGIT_RAW, genie.getRawEventCount());
+                //genie.genieWriteObj(GENIE_OBJ_LED_DIGITS, LEDDIGITS_DIGIT_ACCEPTED, acceptedCount);
+                //genie.genieWriteObj(GENIE_OBJ_LED_DIGITS, LEDDIGITS_DIGIT_REJECTED, genie.getDebouncedEventCount());
             }
         }
 

@@ -10,13 +10,14 @@
 
 /* Forms / Menus */
 #define FORM_MAIN_FORM 0
+#define FORM_NEXT_FORM 1
 
 /* User Buttons */
-#define USERBUTTON_BTN_TEST 0
+#define USERBUTTON_BUTTON_0 0
+#define USERBUTTON_BUTTON_1 1
 
-/* LedDigits */
-#define LEDDIGITS_DIGIT_RAW 0
-#define LEDDIGITS_DIGIT_ACCEPTED 1
-#define LEDDIGITS_DIGIT_REJECTED 2
+/* Static Texts */
+#define STATICTEXT_TEXT_0 0
+#define STATICTEXT_TEXT_1 1
 
 #endif /* GENIE_OBJECTS_H */
