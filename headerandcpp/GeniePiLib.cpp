@@ -58,6 +58,11 @@ unsigned int GeniePi::getAckTimeout(void) const { return ackTimeoutMs.load(); }
 
 uint32_t GeniePi::getDroppedEventCount(void) const { return droppedEvents.load(std::memory_order_relaxed); }
 
+uint32_t GeniePi::getRawEventCount(void) const { return rawEventCount.load(std::memory_order_relaxed); }
+uint32_t GeniePi::getDebouncedEventCount(void) const { return debouncedEventCount.load(std::memory_order_relaxed); }
+size_t GeniePi::getQueueSize(void) { std::lock_guard<std::mutex> lock(replyQueueMutex); return replyQueue.size(); }
+
+
 // ===========================================================================
 // Requirement 4: genieReadObj'nin ilgisiz bulup biriktirdigi event'leri
 // SIRAYI BOZMADAN kuyrugun basina geri koyar.
@@ -122,11 +127,15 @@ int GeniePi::genieOpen(char *device, int baud)
     options.c_cc[VTIME] = 100;
 
     tcsetattr(fd, TCSANOW | TCSAFLUSH, &options);
+    int modem_lines = 0;
+ioctl(fd, TIOCMGET, &modem_lines);
+modem_lines &= ~(TIOCM_DTR | TIOCM_RTS);
+ioctl(fd, TIOCMSET, &modem_lines);
 
-    ioctl(fd, TIOCMGET, &status);
-    status |= TIOCM_DTR;
-    status |= TIOCM_RTS;
-    ioctl(fd, TIOCMSET, &status);
+    // ioctl(fd, TIOCMGET, &status);
+    //status |= TIOCM_DTR;
+    //status |= TIOCM_RTS;
+    //ioctl(fd, TIOCMSET, &status);
 
     usleep(10000);
 
@@ -310,12 +319,24 @@ void GeniePi::genieReplyListener(void)
             unsigned int data = (unsigned int)((msb << 8) | lsb);
             auto now = std::chrono::steady_clock::now();
 
+            // Fiziksel dogrulama testi: "ham" sayac, debounce karari
+            // verilmeden ONCE, her gecerli (checksum dogrulanmis)
+            // GENIE_REPORT_EVENT icin artiyor - boylece debounce tarafindan
+            // elenen bir event bile host tarafinda SAYILABILIYOR (sadece
+            // event queue'ya girmiyor).
+            if (cmd == GENIE_REPORT_EVENT)
+                rawEventCount.fetch_add(1, std::memory_order_relaxed);
+
+
+
             // Requirement 1: debounce SADECE GENIE_REPORT_EVENT (button/
             // slider/switch/rockersw gibi widget event'leri) icin uygulanir;
             // GENIE_REPORT_OBJ (genieReadObj cevaplari) debounce'a TABI DEGIL.
             if (cmd == GENIE_REPORT_EVENT &&
                 shouldDebounce(object, index, data, now))
             {
+                 debouncedEventCount.fetch_add(1, std::memory_order_relaxed);
+
                 continue; // duplicate rapid press -> discard, kuyruga hic girmiyor
             }
 

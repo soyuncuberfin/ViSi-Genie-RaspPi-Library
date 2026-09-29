@@ -222,6 +222,12 @@ public:
     // --- Requirement 3: Queue overflow gozlemlenebilirligi ---
     uint32_t getDroppedEventCount(void) const;
 
+        // --- Fiziksel dogrulama testi icin: ham/debounce sayaclari ---
+    uint32_t getRawEventCount(void) const;
+    uint32_t getDebouncedEventCount(void) const;
+    size_t   getQueueSize(void); // o anki kuyruk uzunlugu ("queue state" loglamasi icin) - non-const (mutex kilitliyor)
+
+
     int  genieReplyAvail(void);
     void genieGetReply(struct genieReplyStruct *reply);
 
@@ -320,6 +326,18 @@ private:
 
     // Requirement 3: overflow artik sessiz degil, gozlemlenebilir.
     std::atomic<uint32_t> droppedEvents{0};
+
+
+        // ===================================================================
+    // Fiziksel doğrulama testi (Task: ViSi Genie Debouncing) için eklenen
+    // enstrümantasyon: debounce, event'i kuyruğa girmeden önce elediği için
+    // host normalde elenen event'lerden HİÇ haberdar olmuyordu. Bunlar
+    // olmadan ekrandaki "ham event sayısı" alanını dolduracak veri yoktu.
+    // ===================================================================
+    std::atomic<uint32_t> rawEventCount{0};       // her gecerli GENIE_REPORT_EVENT (debounce'dan ONCE)
+    std::atomic<uint32_t> debouncedEventCount{0}; // debounce tarafindan elenenler
+ 
+
 
     // ===================================================================
     // Requirement 1: Button Event Debounce
