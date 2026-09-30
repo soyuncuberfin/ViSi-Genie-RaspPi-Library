@@ -126,16 +126,23 @@ int GeniePi::genieOpen(char *device, int baud)
     options.c_cc[VMIN]  = 0;
     options.c_cc[VTIME] = 100;
 
-    tcsetattr(fd, TCSANOW | TCSAFLUSH, &options);
-    int modem_lines = 0;
-ioctl(fd, TIOCMGET, &modem_lines);
-modem_lines &= ~(TIOCM_DTR | TIOCM_RTS);
-ioctl(fd, TIOCMSET, &modem_lines);
+ 
+ if (tcsetattr(fd, TCSANOW | TCSAFLUSH, &options) < 0)
+    {
+        close(fd);
+        return -1;
+    }
 
-    // ioctl(fd, TIOCMGET, &status);
-    //status |= TIOCM_DTR;
-    //status |= TIOCM_RTS;
-    //ioctl(fd, TIOCMSET, &status);
+    int modem_lines = 0;
+    if (ioctl(fd, TIOCMGET, &modem_lines) != -1)
+    {
+        modem_lines &= ~(TIOCM_DTR | TIOCM_RTS);
+        if (ioctl(fd, TIOCMSET, &modem_lines) == -1)
+        {
+            close(fd);
+            return -1;
+        }
+    }
 
     usleep(10000);
 
